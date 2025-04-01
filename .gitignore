@@ -1,0 +1,4 @@
+__pycache__
+llama-3.2-1B/
+*.npz
+tokenizer.model.np
