@@ -7,7 +7,8 @@ This repository contains numpy implementation of the llama 3 model architecture.
 - [NumPy Output Log](./outputs/np_20250331_235520.log)
 - [Hugging Face Output Log](./outputs/hf_20250331_235335.log)
 
-The following plots compare the internal activations between this NumPy implementation (`llama3.py`) and a reference HuggingFace implementation (`generate_hf.py`) at various stages within the model, using the same input and weights.
+The following plots compare the internal activations between this NumPy implementation (`llama3.py`) and a reference HuggingFace implementation (`generate_hf.py`) at various stages within the model, using the same input and weights. 
+Note that the NumPy implementation may not perfectly match the reference, and these plots visually highlight potential differences in the activations. [WIP]
 
 ## Plots
 
