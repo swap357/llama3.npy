@@ -4,6 +4,7 @@ import os
 from typing import Optional
 import numpy as np
 import warnings
+import logging
 
 # Suppress specific transformers warnings about do_sample=False
 warnings.filterwarnings("ignore", category=UserWarning, message=".*`do_sample` is set to `False`.*")
@@ -12,6 +13,10 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer, LlamaForCausalLM
 from threading import Thread
 from config import ModelArgs, HF_MODEL_PATH, HF_TOKENIZER_PATH
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 DTYPE = torch.float32
 
@@ -30,10 +35,15 @@ def generate_text(prompt: str, args: Optional[ModelArgs] = None) -> str:
     torch.backends.cudnn.deterministic = True
     
     # Initialize tokenizer and model
+    logger.info(f"Loading tokenizer from {HF_TOKENIZER_PATH}")
     load_start = time.time()
     tokenizer = AutoTokenizer.from_pretrained(HF_TOKENIZER_PATH, trust_remote_code=True)
+    logger.info(f"Tokenizer initialized with vocab size: {tokenizer.vocab_size}")
+    logger.info(f"BOS ID: {tokenizer.bos_token_id}, EOS ID: {tokenizer.eos_token_id}")
+    # Optional: Add check for space token if needed, like in check_hf_tokens.py
     
     # Load model with appropriate dtype and device map
+    logger.info(f"Loading model from {HF_MODEL_PATH}")
     model = AutoModelForCausalLM.from_pretrained(
         HF_MODEL_PATH, 
         torch_dtype=DTYPE,
@@ -43,6 +53,30 @@ def generate_text(prompt: str, args: Optional[ModelArgs] = None) -> str:
     load_time = time.time() - load_start
     print(f"HF Model Class: {type(model)}") # Print the loaded model class
     print(f"HF Model Config RMS Norm Epsilon: {model.config.rms_norm_eps}") # Print the epsilon value
+
+    # Log model weights statistics
+    logger.info("==== HuggingFace Model Weight Statistics ====")
+    for name, tensor in model.state_dict().items():
+        try:
+            # Ensure tensor is on CPU and float32 for stats calculation
+            tensor_cpu_f32 = tensor.float().cpu().numpy()
+            if np.isnan(tensor_cpu_f32).any():
+                 logger.warning(f"Weight {name}: Contains NaN values")
+                 tensor_min, tensor_max, tensor_mean, tensor_std = 0.0, 0.0, 0.0, 0.0
+            else:
+                tensor_min = tensor_cpu_f32.min()
+                tensor_max = tensor_cpu_f32.max()
+                tensor_mean = tensor_cpu_f32.mean()
+                tensor_std = tensor_cpu_f32.std()
+
+            logger.info(
+                f"{name}: shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
+                f"min={tensor_min:.4f}, max={tensor_max:.4f}, "
+                f"mean={tensor_mean:.4f}, std={tensor_std:.4f}"
+            )
+        except Exception as e:
+            logger.error(f"Could not process weight {name}: {e}")
+    logger.info("==========================================")
 
     # Set up streamer for token-by-token output
     streamer = TextIteratorStreamer(tokenizer, skip_special_tokens=True, skip_prompt=True)
