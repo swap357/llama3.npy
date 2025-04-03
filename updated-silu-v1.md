@@ -1,5 +1,15 @@
 # llama3.npy
 
+```
+--- a/llama3.py
++++ b/llama3.py
+@@ -28,5 +28,6 @@
+ 
+ def silu(x):
++    x = np.clip(x, -88.0, 88.0)
+     return x * (1.0 / (1.0 + np.exp(-x)))
+```     
+
 Figure 1: Embeddings Comparison
 
 ![Embeddings Comparison](./plots/np-clip-plots/embeddings_comparison.png)
