@@ -12,6 +12,9 @@ Note that the NumPy implementation may not perfectly match the reference, and th
 
 ## Plots
 
+Figure 0: Llama3 arch
+![Llama3 model](./plots/llama3_forward_pass.png)
+
 Figure 1: Embeddings Comparison
 ![Embeddings Comparison](./plots/embeddings_comparison.png)
 
