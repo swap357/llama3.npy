@@ -4,6 +4,10 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 import os
 import logging
+import sys
+
+# Add project root to Python path to import config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import HF_MODEL_PATH, NP_MODEL_PATH, TORCH_DTYPE, NP_DTYPE
 
 # Set up logging

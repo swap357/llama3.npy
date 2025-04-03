@@ -2,6 +2,9 @@ from transformers import AutoTokenizer
 import json
 import os
 import sys
+
+# Add project root to Python path to import config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import HF_TOKENIZER_PATH, NP_TOKENIZER_PATH
 
 def convert_hf_tokenizer_to_np(model_path, output_path):
