@@ -25,7 +25,6 @@ def softmax_jit(x):
     return e_x / (np.sum(e_x, axis=1, keepdims=True) + 1e-10)
 
 def silu(x):
-    x = np.clip(x, -88.0, 88.0)
     return x * (1.0 / (1.0 + np.exp(-x)))
 
 @numba.njit
