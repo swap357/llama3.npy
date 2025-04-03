@@ -86,9 +86,6 @@ def analyze_tensor_differences(hf_tensor, np_tensor, title):
     print(f"  Mean absolute difference: {np.mean(differences):.6f}")
     print(f"  Median absolute difference: {np.median(differences):.6f}")
     print(f"  Std of absolute differences: {np.std(differences):.6f}")
-    print(f"  Max relative difference: {np.max(relative_diffs):.6f}")
-    print(f"  Mean relative difference: {np.mean(relative_diffs):.6f}")
-    print(f"  Correlation coefficient: {np.corrcoef(hf_tensor, np_tensor)[0,1]:.6f}")
     
     # Find indices of largest differences
     top_5_indices = np.argsort(differences)[-5:]
