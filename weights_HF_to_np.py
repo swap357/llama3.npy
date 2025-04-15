@@ -5,10 +5,12 @@ from tqdm import tqdm
 import os
 import logging
 import sys
-
+import torch
 # Add project root to Python path to import config
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import HF_MODEL_PATH, NP_MODEL_PATH, TORCH_DTYPE, NP_DTYPE
+from config import HF_MODEL_PATH, NP_MODEL_PATH, NP_DTYPE
+
+TORCH_DTYPE = torch.float32
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
