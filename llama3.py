@@ -199,9 +199,12 @@ class NpLlama:
             pos = 0 if i == 0 else t + i - 1
             if i == 0:
                 logits, activations = self.forward_capture(inputs, pos)
+                print(f"DEBUG logits shape: {logits.shape}, first token top-5: {np.argsort(logits[0, 0])[-5:][::-1]}")
                 np.savez("np_tensors.npz", **activations)
             else:
                 logits = self.forward_capture(inputs, pos)[0]
+                if i < 5:  # Only print first few for debugging
+                    print(f"DEBUG token {i} logits shape: {logits.shape}, top-5: {np.argsort(logits[0, 0])[-5:][::-1]}")
             if self.args.do_sample:
                 logits /= self.args.temperature
                 probs = np.exp(logits - np.max(logits))
@@ -210,6 +213,8 @@ class NpLlama:
                 next_id = np.array([[next_token]], dtype=input_ids.dtype)
             else:
                 next_id = np.argmax(logits, axis=-1).reshape(b, 1)
+                if i < 5:  # Only print first few for debugging
+                    print(f"DEBUG selected token {i}: {next_id[0, 0]}")
             yield next_id
 
 
