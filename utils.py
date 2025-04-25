@@ -12,10 +12,10 @@ def load_parameters(model_path):
     weights = np.load(model_path)
     
     # Log weight statistics before conversion
-    for name, weight in weights.items():
-        logger.info(f"{name}: shape={weight.shape}, dtype={weight.dtype}, "
-                   f"min={weight.min():.4f}, max={weight.max():.4f}, "
-                   f"mean={weight.mean():.4f}, std={weight.std():.4f}")
+    # for name, weight in weights.items():
+    #     logger.info(f"{name}: shape={weight.shape}, dtype={weight.dtype}, "
+    #                f"min={weight.min():.4f}, max={weight.max():.4f}, "
+    #                f"mean={weight.mean():.4f}, std={weight.std():.4f}")
     
     # Convert weights to target dtype
     converted = {}
@@ -31,8 +31,8 @@ def load_parameters(model_path):
         converted[name] = weight
         
         # Log weight statistics after conversion
-        logger.info(f"{name} (converted): dtype={weight.dtype}, "
-                   f"min={weight.min():.4f}, max={weight.max():.4f}, "
-                   f"mean={weight.mean():.4f}, std={weight.std():.4f}")
+        # logger.info(f"{name} (converted): dtype={weight.dtype}, "
+        #            f"min={weight.min():.4f}, max={weight.max():.4f}, "
+        #            f"mean={weight.mean():.4f}, std={weight.std():.4f}")
     
     return converted
