@@ -3,3 +3,4 @@ llama-3.2-1B/
 *.npz
 tokenizer.model.np
 visualizations*
+.vscode/

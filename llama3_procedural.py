@@ -4,10 +4,12 @@ import time
 import sys
 import logging
 import numba
+import json
+import os
+from pathlib import Path
 import config as model_config
 import tokenizer as model_tokenizer
 import utils as model_utils
-import os
 
 numba.config.NUMBA_DEBUG_PRINT_AFTER_COMPILE = False
 logger = logging.getLogger(__name__)
@@ -17,6 +19,33 @@ USE_FLOAT32 = True
 # Layer-specific caches for keys and values
 k_caches = None
 v_caches = None
+
+def tensor_to_dict(tensor, name):
+    """Convert tensor to dictionary with statistics"""
+    # Ensure we're working with a numpy array
+    if not isinstance(tensor, np.ndarray):
+        tensor = np.array(tensor)
+
+    return {
+        "name": name,
+        "shape": list(tensor.shape),
+        "mean": float(tensor.mean()),
+        "std": float(tensor.std()),
+        "min": float(tensor.min()),
+        "max": float(tensor.max()),
+        "data": tensor.tolist()  # Save full tensor data for detailed comparison
+    }
+
+def save_token_stats(stats_dict, token_idx, output_dir):
+    """Save statistics for a token generation step"""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save each tensor's stats to a separate file
+    for tensor_name, tensor_stats in stats_dict.items():
+        file_path = output_dir / f"token_{token_idx}_{tensor_name}.json"
+        with open(file_path, 'w') as f:
+            json.dump(tensor_stats, f, indent=2)
 
 def softmax(x):
     x_max = np.max(x, axis=-1, keepdims=True)
@@ -76,13 +105,13 @@ def initialize_kv_caches(max_batch_size, max_seq_len, n_kv_heads, head_dim, n_la
     k_caches = [np.zeros((max_batch_size, max_seq_len, n_kv_heads, head_dim), dtype=model_config.NP_DTYPE) for _ in range(n_layers)]
     v_caches = [np.zeros((max_batch_size, max_seq_len, n_kv_heads, head_dim), dtype=model_config.NP_DTYPE) for _ in range(n_layers)]
 
-def attention(x, q_weight, k_weight, v_weight, o_weight, start_pos, mask, cos, sin, 
+def attention(x, q_weight, k_weight, v_weight, o_weight, start_pos, mask, cos, sin,
               n_heads, n_kv_heads, head_dim, scale, layer_idx):
     global k_caches, v_caches
-    
+
     b, t = x.shape[:2]
     xq, xk, xv = x @ q_weight.T, x @ k_weight.T, x @ v_weight.T
-    
+
     xq = xq.reshape(b, t, n_heads, head_dim)
     xk = xk.reshape(b, t, n_kv_heads, head_dim)
     xv = xv.reshape(b, t, n_kv_heads, head_dim)
@@ -94,12 +123,12 @@ def attention(x, q_weight, k_weight, v_weight, o_weight, start_pos, mask, cos, s
     v_caches[layer_idx][:, start_pos:start_pos + t] = xv
     k_seq = k_caches[layer_idx][:, :start_pos + t]
     v_seq = v_caches[layer_idx][:, :start_pos + t]
-    
+
     if n_heads > n_kv_heads:
         rep = n_heads // n_kv_heads
         k_seq = np.repeat(k_seq, rep, axis=2)
         v_seq = np.repeat(v_seq, rep, axis=2)
-    
+
     xq, k_seq, v_seq = xq.transpose(0, 2, 1, 3), k_seq.transpose(0, 2, 1, 3), v_seq.transpose(0, 2, 1, 3)
     scores = np.einsum('bhqd,bhkd->bhqk', xq, k_seq) * scale
 
@@ -120,42 +149,62 @@ def feed_forward(x, up_weight, gate_weight, down_weight, use_jit):
     ffn_out = (swish * up_proj) @ down
     return ffn_out
 
-def transformer_block(x, layer_weights, pos, mask, cos, sin, use_jit, n_heads, n_kv_heads, head_dim, norm_eps, layer_idx):
+def transformer_block(x, layer_weights, pos, mask, cos, sin, use_jit, n_heads, n_kv_heads, head_dim, norm_eps, layer_idx, token_stats=None):
     prefix = f"model.layers.{layer_idx}."
-    
+
     q_weight = layer_weights[prefix + "self_attn.q_proj.weight"]
     k_weight = layer_weights[prefix + "self_attn.k_proj.weight"]
     v_weight = layer_weights[prefix + "self_attn.v_proj.weight"]
     o_weight = layer_weights[prefix + "self_attn.o_proj.weight"]
-    
+
     up_weight = layer_weights[prefix + "mlp.up_proj.weight"]
     gate_weight = layer_weights[prefix + "mlp.gate_proj.weight"]
     down_weight = layer_weights[prefix + "mlp.down_proj.weight"]
-    
+
     ln1_weight = layer_weights[prefix + "input_layernorm.weight"]
     ln2_weight = layer_weights[prefix + "post_attention_layernorm.weight"]
-    
+
+    layer_prefix = f"layer_{layer_idx}"
+
     norm_x = rms_norm(x, ln1_weight, norm_eps, use_jit)
+    if token_stats is not None:
+        token_stats[f"{layer_prefix}_input_norm"] = tensor_to_dict(norm_x, f"{layer_prefix}_input_norm")
+
     scale = 1.0 / math.sqrt(head_dim)
-    
-    attn_out = attention(norm_x, q_weight, k_weight, v_weight, o_weight, 
+
+    attn_out = attention(norm_x, q_weight, k_weight, v_weight, o_weight,
                          pos, mask, cos, sin, n_heads, n_kv_heads, head_dim, scale, layer_idx)
-    
+    if token_stats is not None:
+        token_stats[f"{layer_prefix}_attention_output"] = tensor_to_dict(attn_out, f"{layer_prefix}_attention_output")
+
     h = x + attn_out
+    if token_stats is not None:
+        token_stats[f"{layer_prefix}_after_first_residual"] = tensor_to_dict(h, f"{layer_prefix}_after_first_residual")
+
     norm_h = rms_norm(h, ln2_weight, norm_eps, use_jit)
+    if token_stats is not None:
+        token_stats[f"{layer_prefix}_post_attention_norm"] = tensor_to_dict(norm_h, f"{layer_prefix}_post_attention_norm")
+
     ffn_out = feed_forward(norm_h, up_weight, gate_weight, down_weight, use_jit)
+    if token_stats is not None:
+        token_stats[f"{layer_prefix}_mlp_output"] = tensor_to_dict(ffn_out, f"{layer_prefix}_mlp_output")
+
     block_output = h + ffn_out
+    if token_stats is not None:
+        token_stats[f"{layer_prefix}_final_output"] = tensor_to_dict(block_output, f"{layer_prefix}_final_output")
 
     return block_output
 
-def forward(input_ids, pos, weights, args, cos, sin, use_jit):
+def forward(input_ids, pos, weights, args, cos, sin, use_jit, token_stats=None):
     b, t = input_ids.shape
     embed = weights["model.embed_tokens.weight"]
     lm_head = weights["lm_head.weight"].T if "lm_head.weight" in weights else weights["model.embed_tokens.weight"].T
     norm_weight = weights["model.norm.weight"]
-    
+
     hidden = embed[input_ids]
-    
+    if token_stats is not None:
+        token_stats["embeddings"] = tensor_to_dict(hidden, "embeddings")
+
     mask = None
     if t > 1:
         mask = np.triu(np.full((t, t), float("-inf"), dtype=model_config.NP_DTYPE), 1)
@@ -164,28 +213,39 @@ def forward(input_ids, pos, weights, args, cos, sin, use_jit):
 
     for i in range(args.n_layers):
         hidden = transformer_block(
-            hidden, weights, pos, mask, cos_t, sin_t, use_jit, 
+            hidden, weights, pos, mask, cos_t, sin_t, use_jit,
             args.n_heads, args.n_kv_heads or args.n_heads, args.dim // args.n_heads,
-            args.norm_eps, i
+            args.norm_eps, i, token_stats
         )
 
     final_norm = rms_norm(hidden, norm_weight, args.norm_eps, use_jit)
+    if token_stats is not None:
+        token_stats["final_norm"] = tensor_to_dict(final_norm, "final_norm")
+
     logits = final_norm[:, [-1], :] @ lm_head
-    
+    if token_stats is not None:
+        token_stats["logits"] = tensor_to_dict(logits, "logits")
+
     return logits
 
-def generate(input_ids, max_new_tokens, weights, args, cos, sin, use_jit):
+def generate(input_ids, max_new_tokens, weights, args, cos, sin, use_jit, output_dir="llama3_stats"):
     b, t = input_ids.shape
     np.random.seed(args.seed)
     generated_ids = []
     current_input_ids = input_ids.copy()
-    
+
     for i in range(max_new_tokens):
         pos = 0 if i == 0 else t + i - 1
         inputs_this_step = current_input_ids if i == 0 else current_input_ids[:, [-1]]
-        
-        logits = forward(inputs_this_step, pos, weights, args, cos, sin, use_jit)
-        
+
+        # Dictionary to store all tensor stats for this token
+        token_stats = {}
+
+        logits = forward(inputs_this_step, pos, weights, args, cos, sin, use_jit, token_stats)
+
+        # Save all stats for this token using the generation index
+        save_token_stats(token_stats, i, output_dir)  # Use generation index instead of position
+
         if args.do_sample:
             logits_last = logits[:, -1, :] / args.temperature
             probs = softmax_jit(logits_last) if use_jit else softmax(logits_last)
@@ -194,27 +254,27 @@ def generate(input_ids, max_new_tokens, weights, args, cos, sin, use_jit):
         else:
             logits_last = logits[:, -1, :]
             next_id = np.argmax(logits_last, axis=-1).reshape(b, 1)
-            
+
         current_input_ids = np.concatenate([current_input_ids, next_id], axis=1)
         generated_ids.append(next_id[0, 0].item())
-        
+
         yield next_id
 
 def initialize_model(path, args, use_jit=False):
     weights = model_utils.load_parameters(path)
-    
+
     if "lm_head.weight" in weights:
         logger.info("Using separate lm_head weights.")
     else:
         logger.info("Using shared embedding weights for lm_head.")
-    
+
     cos, sin = compute_cos_sin_cache(args.dim // args.n_heads, args.max_seq_len)
-    
+
     # Initialize KV caches for each layer
     head_dim = args.dim // args.n_heads
     n_kv_heads = args.n_kv_heads or args.n_heads
     initialize_kv_caches(args.max_batch_size, args.max_seq_len, n_kv_heads, head_dim, args.n_layers)
-    
+
     return weights, cos, sin
 
 if __name__ == '__main__':
@@ -223,25 +283,26 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--prompt', type=str, default="Once upon a time")
     parser.add_argument('--use-jit', action='store_true')
+    parser.add_argument('--output-dir', type=str, default="llama3_stats", help="Directory to save tensor statistics")
     args_cli = parser.parse_args()
 
     args = model_config.ModelArgs()
     tokenizer = model_tokenizer.Tokenizer(model_config.NP_TOKENIZER_PATH)
-    
+
     weights, cos, sin = initialize_model(model_config.NP_MODEL_PATH, args, use_jit=args_cli.use_jit)
     input_ids = np.array([tokenizer.encode(args_cli.prompt)])
 
     print(f"\n{args_cli.prompt}", end="")
     start = time.time()
     token_count = input_ids.shape[1]
-    
-    for token in generate(input_ids, args.max_new_tokens, weights, args, cos, sin, args_cli.use_jit):
+
+    for token in generate(input_ids, args.max_new_tokens, weights, args, cos, sin, args_cli.use_jit, args_cli.output_dir):
         token_count += 1
         tok_id = token[0, 0].item()
         if tok_id in [tokenizer.eos_id, tokenizer.bos_id]:
             break
         print(tokenizer.decode([tok_id]), end="")
         sys.stdout.flush()
-        
+
     elapsed = time.time() - start
-    print(f"\n\nToken count: {token_count}, elapsed: {elapsed:.2f}s, {round(token_count / elapsed)} tokens/s") 
+    print(f"\n\nToken count: {token_count}, elapsed: {elapsed:.2f}s, {round(token_count / elapsed)} tokens/s")
