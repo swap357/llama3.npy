@@ -76,13 +76,13 @@ def initialize_kv_caches(max_batch_size, max_seq_len, n_kv_heads, head_dim, n_la
     k_caches = [np.zeros((max_batch_size, max_seq_len, n_kv_heads, head_dim), dtype=model_config.NP_DTYPE) for _ in range(n_layers)]
     v_caches = [np.zeros((max_batch_size, max_seq_len, n_kv_heads, head_dim), dtype=model_config.NP_DTYPE) for _ in range(n_layers)]
 
-def attention(x, q_weight, k_weight, v_weight, o_weight, start_pos, mask, cos, sin, 
+def attention(x, q_weight, k_weight, v_weight, o_weight, start_pos, mask, cos, sin,
               n_heads, n_kv_heads, head_dim, scale, layer_idx):
     global k_caches, v_caches
-    
+
     b, t = x.shape[:2]
     xq, xk, xv = x @ q_weight.T, x @ k_weight.T, x @ v_weight.T
-    
+
     xq = xq.reshape(b, t, n_heads, head_dim)
     xk = xk.reshape(b, t, n_kv_heads, head_dim)
     xv = xv.reshape(b, t, n_kv_heads, head_dim)
@@ -94,12 +94,12 @@ def attention(x, q_weight, k_weight, v_weight, o_weight, start_pos, mask, cos, s
     v_caches[layer_idx][:, start_pos:start_pos + t] = xv
     k_seq = k_caches[layer_idx][:, :start_pos + t]
     v_seq = v_caches[layer_idx][:, :start_pos + t]
-    
+
     if n_heads > n_kv_heads:
         rep = n_heads // n_kv_heads
         k_seq = np.repeat(k_seq, rep, axis=2)
         v_seq = np.repeat(v_seq, rep, axis=2)
-    
+
     xq, k_seq, v_seq = xq.transpose(0, 2, 1, 3), k_seq.transpose(0, 2, 1, 3), v_seq.transpose(0, 2, 1, 3)
     scores = np.einsum('bhqd,bhkd->bhqk', xq, k_seq) * scale
 
@@ -122,25 +122,25 @@ def feed_forward(x, up_weight, gate_weight, down_weight, use_jit):
 
 def transformer_block(x, layer_weights, pos, mask, cos, sin, use_jit, n_heads, n_kv_heads, head_dim, norm_eps, layer_idx):
     prefix = f"model.layers.{layer_idx}."
-    
+
     q_weight = layer_weights[prefix + "self_attn.q_proj.weight"]
     k_weight = layer_weights[prefix + "self_attn.k_proj.weight"]
     v_weight = layer_weights[prefix + "self_attn.v_proj.weight"]
     o_weight = layer_weights[prefix + "self_attn.o_proj.weight"]
-    
+
     up_weight = layer_weights[prefix + "mlp.up_proj.weight"]
     gate_weight = layer_weights[prefix + "mlp.gate_proj.weight"]
     down_weight = layer_weights[prefix + "mlp.down_proj.weight"]
-    
+
     ln1_weight = layer_weights[prefix + "input_layernorm.weight"]
     ln2_weight = layer_weights[prefix + "post_attention_layernorm.weight"]
-    
+
     norm_x = rms_norm(x, ln1_weight, norm_eps, use_jit)
     scale = 1.0 / math.sqrt(head_dim)
-    
-    attn_out = attention(norm_x, q_weight, k_weight, v_weight, o_weight, 
+
+    attn_out = attention(norm_x, q_weight, k_weight, v_weight, o_weight,
                          pos, mask, cos, sin, n_heads, n_kv_heads, head_dim, scale, layer_idx)
-    
+
     h = x + attn_out
     norm_h = rms_norm(h, ln2_weight, norm_eps, use_jit)
     ffn_out = feed_forward(norm_h, up_weight, gate_weight, down_weight, use_jit)
@@ -153,9 +153,9 @@ def forward(input_ids, pos, weights, args, cos, sin, use_jit):
     embed = weights["model.embed_tokens.weight"]
     lm_head = weights["lm_head.weight"].T if "lm_head.weight" in weights else weights["model.embed_tokens.weight"].T
     norm_weight = weights["model.norm.weight"]
-    
+
     hidden = embed[input_ids]
-    
+
     mask = None
     if t > 1:
         mask = np.triu(np.full((t, t), float("-inf"), dtype=model_config.NP_DTYPE), 1)
@@ -164,14 +164,14 @@ def forward(input_ids, pos, weights, args, cos, sin, use_jit):
 
     for i in range(args.n_layers):
         hidden = transformer_block(
-            hidden, weights, pos, mask, cos_t, sin_t, use_jit, 
+            hidden, weights, pos, mask, cos_t, sin_t, use_jit,
             args.n_heads, args.n_kv_heads or args.n_heads, args.dim // args.n_heads,
             args.norm_eps, i
         )
 
     final_norm = rms_norm(hidden, norm_weight, args.norm_eps, use_jit)
     logits = final_norm[:, [-1], :] @ lm_head
-    
+
     return logits
 
 def generate(input_ids, max_new_tokens, weights, args, cos, sin, use_jit):
@@ -179,13 +179,13 @@ def generate(input_ids, max_new_tokens, weights, args, cos, sin, use_jit):
     np.random.seed(args.seed)
     generated_ids = []
     current_input_ids = input_ids.copy()
-    
+
     for i in range(max_new_tokens):
         pos = 0 if i == 0 else t + i - 1
         inputs_this_step = current_input_ids if i == 0 else current_input_ids[:, [-1]]
-        
+
         logits = forward(inputs_this_step, pos, weights, args, cos, sin, use_jit)
-        
+
         if args.do_sample:
             logits_last = logits[:, -1, :] / args.temperature
             probs = softmax_jit(logits_last) if use_jit else softmax(logits_last)
@@ -194,27 +194,22 @@ def generate(input_ids, max_new_tokens, weights, args, cos, sin, use_jit):
         else:
             logits_last = logits[:, -1, :]
             next_id = np.argmax(logits_last, axis=-1).reshape(b, 1)
-            
+
         current_input_ids = np.concatenate([current_input_ids, next_id], axis=1)
         generated_ids.append(next_id[0, 0].item())
-        
+
         yield next_id
 
 def initialize_model(path, args, use_jit=False):
     weights = model_utils.load_parameters(path)
-    
-    if "lm_head.weight" in weights:
-        logger.info("Using separate lm_head weights.")
-    else:
-        logger.info("Using shared embedding weights for lm_head.")
-    
+
     cos, sin = compute_cos_sin_cache(args.dim // args.n_heads, args.max_seq_len)
-    
+
     # Initialize KV caches for each layer
     head_dim = args.dim // args.n_heads
     n_kv_heads = args.n_kv_heads or args.n_heads
     initialize_kv_caches(args.max_batch_size, args.max_seq_len, n_kv_heads, head_dim, args.n_layers)
-    
+
     return weights, cos, sin
 
 if __name__ == '__main__':
@@ -223,18 +218,23 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--prompt', type=str, default="Once upon a time")
     parser.add_argument('--use-jit', action='store_true')
+    parser.add_argument('--max-new-tokens', type=int, help="Override max new tokens from config")
     args_cli = parser.parse_args()
 
     args = model_config.ModelArgs()
+    # Override max_new_tokens if provided via CLI
+    if args_cli.max_new_tokens is not None:
+        args.max_new_tokens = args_cli.max_new_tokens
+
     tokenizer = model_tokenizer.Tokenizer(model_config.NP_TOKENIZER_PATH)
-    
+
     weights, cos, sin = initialize_model(model_config.NP_MODEL_PATH, args, use_jit=args_cli.use_jit)
     input_ids = np.array([tokenizer.encode(args_cli.prompt)])
 
     print(f"\n{args_cli.prompt}", end="")
     start = time.time()
     token_count = input_ids.shape[1]
-    
+
     for token in generate(input_ids, args.max_new_tokens, weights, args, cos, sin, args_cli.use_jit):
         token_count += 1
         tok_id = token[0, 0].item()
@@ -242,6 +242,6 @@ if __name__ == '__main__':
             break
         print(tokenizer.decode([tok_id]), end="")
         sys.stdout.flush()
-        
+
     elapsed = time.time() - start
-    print(f"\n\nToken count: {token_count}, elapsed: {elapsed:.2f}s, {round(token_count / elapsed)} tokens/s") 
+    print(f"\n\nToken count: {token_count}, elapsed: {elapsed:.2f}s, {round(token_count / elapsed)} tokens/s")
