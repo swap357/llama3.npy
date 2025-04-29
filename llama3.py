@@ -4,7 +4,6 @@ import time
 import sys
 import os
 import logging
-import numba
 
 # Add repo root to path to import from root directory
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -12,7 +11,6 @@ import config as model_config
 import tokenizer as model_tokenizer
 import utils as model_utils
 
-numba.config.NUMBA_DEBUG_PRINT_COMPILE = False
 logger = logging.getLogger(__name__)
 
 USE_FLOAT32 = True
@@ -94,7 +92,7 @@ def apply_rotary_emb(xq, xk, cos, sin):
     cos, sin = np.expand_dims(cos, (0, 2)), np.expand_dims(sin, (0, 2))
     return rotate(xq), rotate(xk)
 
-def rms_norm(x, weight, eps, use_jit):
+def rms_norm(x, weight, eps):
     """
     Root Mean Square (RMS) Layer Normalization.
 
@@ -172,7 +170,7 @@ def attention(x, q_weight, k_weight, v_weight, o_weight, start_pos, mask, cos, s
 
     return final_out
 
-def feed_forward(x, up_weight, gate_weight, down_weight, use_jit):
+def feed_forward(x, up_weight, gate_weight, down_weight):
     """
     SwiGLU feed-forward network.
 
@@ -194,7 +192,7 @@ def feed_forward(x, up_weight, gate_weight, down_weight, use_jit):
     ffn_out = (swish * up_proj) @ down
     return ffn_out
 
-def transformer_block(x, layer_weights, pos, mask, cos, sin, use_jit, n_heads, n_kv_heads, head_dim, norm_eps, layer_idx):
+def transformer_block(x, layer_weights, pos, mask, cos, sin, n_heads, n_kv_heads, head_dim, norm_eps, layer_idx):
     """
     Single transformer layer with attention and feed-forward network.
 
@@ -222,20 +220,20 @@ def transformer_block(x, layer_weights, pos, mask, cos, sin, use_jit, n_heads, n
     ln1_weight = layer_weights[prefix + "input_layernorm.weight"]
     ln2_weight = layer_weights[prefix + "post_attention_layernorm.weight"]
 
-    norm_x = rms_norm(x, ln1_weight, norm_eps, use_jit)
+    norm_x = rms_norm(x, ln1_weight, norm_eps)
     scale = 1.0 / math.sqrt(head_dim)
 
     attn_out = attention(norm_x, q_weight, k_weight, v_weight, o_weight,
                          pos, mask, cos, sin, n_heads, n_kv_heads, head_dim, scale, layer_idx)
 
     h = x + attn_out
-    norm_h = rms_norm(h, ln2_weight, norm_eps, use_jit)
-    ffn_out = feed_forward(norm_h, up_weight, gate_weight, down_weight, use_jit)
+    norm_h = rms_norm(h, ln2_weight, norm_eps)
+    ffn_out = feed_forward(norm_h, up_weight, gate_weight, down_weight)
     block_output = h + ffn_out
 
     return block_output
 
-def forward(input_ids, pos, weights, args, cos, sin, use_jit):
+def forward(input_ids, pos, weights, args, cos, sin):
     """
     Forward pass through the entire model.
 
@@ -260,17 +258,17 @@ def forward(input_ids, pos, weights, args, cos, sin, use_jit):
 
     for i in range(args.n_layers):
         hidden = transformer_block(
-            hidden, weights, pos, mask, cos_t, sin_t, use_jit,
+            hidden, weights, pos, mask, cos_t, sin_t,
             args.n_heads, args.n_kv_heads or args.n_heads, args.dim // args.n_heads,
             args.norm_eps, i
         )
 
-    final_norm = rms_norm(hidden, norm_weight, args.norm_eps, use_jit)
+    final_norm = rms_norm(hidden, norm_weight, args.norm_eps)
     logits = final_norm[:, [-1], :] @ lm_head
 
     return logits
 
-def generate(input_ids, max_new_tokens, weights, args, cos, sin, use_jit):
+def generate(input_ids, max_new_tokens, weights, args, cos, sin):
     """
     Autoregressive token generation.
 
@@ -287,7 +285,7 @@ def generate(input_ids, max_new_tokens, weights, args, cos, sin, use_jit):
         pos = 0 if i == 0 else t + i - 1
         inputs_this_step = current_input_ids if i == 0 else current_input_ids[:, [-1]]
 
-        logits = forward(inputs_this_step, pos, weights, args, cos, sin, use_jit)
+        logits = forward(inputs_this_step, pos, weights, args, cos, sin)
 
         if args.do_sample:
             logits_last = logits[:, -1, :] / args.temperature
@@ -303,7 +301,7 @@ def generate(input_ids, max_new_tokens, weights, args, cos, sin, use_jit):
 
         yield next_id
 
-def initialize_model(path, args, use_jit=False):
+def initialize_model(path, args):
     """
     Initializes the model by loading weights and precomputing position embeddings.
 
@@ -327,7 +325,6 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--prompt', type=str, default="Once upon a time")
-    parser.add_argument('--use-jit', action='store_true')
     parser.add_argument('--max-new-tokens', type=int, help="Override max new tokens from config")
     args_cli = parser.parse_args()
 
@@ -338,14 +335,14 @@ if __name__ == '__main__':
 
     tokenizer = model_tokenizer.Tokenizer(model_config.NP_TOKENIZER_PATH)
 
-    weights, cos, sin = initialize_model(model_config.NP_MODEL_PATH, args, use_jit=args_cli.use_jit)
+    weights, cos, sin = initialize_model(model_config.NP_MODEL_PATH, args)
     input_ids = np.array([tokenizer.encode(args_cli.prompt)])
 
     print(f"\n{args_cli.prompt}", end="")
     start = time.time()
     token_count = input_ids.shape[1]
 
-    for token in generate(input_ids, args.max_new_tokens, weights, args, cos, sin, args_cli.use_jit):
+    for token in generate(input_ids, args.max_new_tokens, weights, args, cos, sin):
         token_count += 1
         tok_id = token[0, 0].item()
         if tok_id in [tokenizer.eos_id, tokenizer.bos_id]:
