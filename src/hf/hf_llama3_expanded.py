@@ -2,19 +2,27 @@ import torch
 import argparse
 import warnings
 import sys
+import os
 import time
+
+# Add repo root to path to import from root directory
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from config import ModelArgs, HF_MODEL_PATH, HF_TOKENIZER_PATH
+
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
 )
-from config import ModelArgs, HF_MODEL_PATH, HF_TOKENIZER_PATH
 
 DTYPE = torch.float32
 
 warnings.filterwarnings("ignore", category=UserWarning, message=".*`do_sample` is set to `False`*")
 
-def generate_text_manual(prompt: str, args: ModelArgs) -> str:
+def generate_text_manual(prompt: str, args: ModelArgs = None) -> str:
     """Generate text token by token and save intermediate tensor statistics."""
+    if args is None:
+        args = ModelArgs()
+
     # Set random seeds for reproducibility
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
@@ -132,7 +140,7 @@ def generate_text_manual(prompt: str, args: ModelArgs) -> str:
     return generated_text
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Generate text and save intermediate tensor statistics")
     parser.add_argument('--prompt', type=str, default="Once upon a time", help="Input prompt for generation")
     parser.add_argument('--max-new-tokens', type=int, default=10, help="Maximum number of tokens to generate")
@@ -144,3 +152,7 @@ if __name__ == "__main__":
     hf_args.seed = args_cli.seed
 
     generate_text_manual(args_cli.prompt, hf_args)
+
+
+if __name__ == "__main__":
+    main()
