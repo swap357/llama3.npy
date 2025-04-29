@@ -18,6 +18,27 @@ DTYPE = torch.float32
 
 warnings.filterwarnings("ignore", category=UserWarning, message=".*`do_sample` is set to `False`*")
 
+# Layer Structure:
+# LlamaDecoderLayer(
+#   (self_attn): LlamaAttention(
+#     (q_proj): Linear(in_features=2048, out_features=2048, bias=False)  # Query projection
+#     (k_proj): Linear(in_features=2048, out_features=512, bias=False)   # Key projection
+#     (v_proj): Linear(in_features=2048, out_features=512, bias=False)   # Value projection
+#     (o_proj): Linear(in_features=2048, out_features=2048, bias=False)  # Output projection
+#   )
+#   (mlp): LlamaMLP(
+#     (gate_proj): Linear(in_features=2048, out_features=8192, bias=False)  # Gate projection
+#     (up_proj): Linear(in_features=2048, out_features=8192, bias=False)    # Up projection
+#     (down_proj): Linear(in_features=8192, out_features=2048, bias=False)  # Down projection
+#     (act_fn): SiLU()  # SwiGLU activation
+#   )
+#   (input_layernorm): LlamaRMSNorm((2048,), eps=1e-05)  # Input layer normalization
+#   (post_attention_layernorm): LlamaRMSNorm((2048,), eps=1e-05)  # Post-attention layer normalization
+# )
+
+# HF reference implementation:
+# https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
+
 def generate_text_manual(prompt: str, args: ModelArgs = None) -> str:
     """Generate text token by token and save intermediate tensor statistics."""
     if args is None:
@@ -53,18 +74,15 @@ def generate_text_manual(prompt: str, args: ModelArgs = None) -> str:
 
     # Generate tokens one by one
     for i in range(args.max_new_tokens):
-
-        # Get embeddings for current sequence
         with torch.no_grad():
-            # 1. Get embeddings
+            # 1. Get embeddings (2048-dimensional)
             hidden_states = model.model.embed_tokens(generated_ids)
 
             # 2. Process through each layer
             for layer_idx in range(model.config.num_hidden_layers):
                 layer = model.model.layers[layer_idx]
-                layer_prefix = f"layer_{layer_idx}"
-
-                # Input layernorm
+                
+                # A. Input Layer Normalization (2048 -> 2048)
                 norm_out = layer.input_layernorm(hidden_states)
 
                 # Prepare attention inputs
@@ -84,7 +102,11 @@ def generate_text_manual(prompt: str, args: ModelArgs = None) -> str:
                 freqs_sin = emb.sin()[None, :, :].to(dtype=hidden_states.dtype)
                 position_embeddings = (freqs_cos, freqs_sin)
 
-                # Self attention
+                # B. Self-Attention Block
+                #    - Query Projection (2048 -> 2048)
+                #    - Key Projection (2048 -> 512)
+                #    - Value Projection (2048 -> 512)
+                #    - Output Projection (2048 -> 2048)
                 attn_output, _ = layer.self_attn(
                     hidden_states=norm_out,
                     attention_mask=causal_mask,
@@ -92,25 +114,29 @@ def generate_text_manual(prompt: str, args: ModelArgs = None) -> str:
                     position_embeddings=position_embeddings
                 )
 
-                # First residual connection
+                # C. First Residual Connection (2048 + 2048 -> 2048)
                 hidden_states = hidden_states + attn_output
 
-                # Post attention norm
+                # D. Post-Attention Layer Normalization (2048 -> 2048)
                 norm_out = layer.post_attention_layernorm(hidden_states)
 
-                # MLP
+                # E. MLP Block (SwiGLU)
+                #    - Gate Projection (2048 -> 8192)
                 gate = layer.mlp.gate_proj(norm_out)
+                #    - Up Projection (2048 -> 8192)
                 up = layer.mlp.up_proj(norm_out)
+                #    - SiLU Activation
                 gate_activated = torch.nn.functional.silu(gate)
+                #    - Down Projection (8192 -> 2048)
                 mlp_output = layer.mlp.down_proj(gate_activated * up)
 
-                # Second residual connection
+                # F. Second Residual Connection (2048 + 2048 -> 2048)
                 hidden_states = hidden_states + mlp_output
 
-            # Final norm
+            # 3. Final Layer Normalization (2048 -> 2048)
             hidden_states = model.model.norm(hidden_states)
 
-            # Get logits for next token
+            # 4. Language Model Head (2048 -> vocab_size)
             logits = model.lm_head(hidden_states)
 
             # Get next token (greedy decoding)
@@ -144,13 +170,15 @@ def main():
     parser = argparse.ArgumentParser(description="Generate text and save intermediate tensor statistics")
     parser.add_argument('--prompt', type=str, default="Once upon a time", help="Input prompt for generation")
     parser.add_argument('--max-new-tokens', type=int, default=10, help="Maximum number of tokens to generate")
-    parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
+    
     args_cli = parser.parse_args()
 
     hf_args = ModelArgs()
     hf_args.max_new_tokens = args_cli.max_new_tokens
-    hf_args.seed = args_cli.seed
 
+    torch.manual_seed(hf_args.seed)
+    torch.cuda.manual_seed(hf_args.seed)
+    torch.backends.cudnn.deterministic = True
     generate_text_manual(args_cli.prompt, hf_args)
 
 
