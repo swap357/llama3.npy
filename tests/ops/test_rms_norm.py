@@ -30,9 +30,7 @@ def test_rms_norm():
     weights_torch = torch.tensor(weights_np)
 
     # 1. Compute RMSNorm using llama3.py implementation
-    # The `use_jit` argument is not actually used in the llama3_rms_norm calculation logic itself.
-    # So, we can pass False or True, it won't affect the numerical output for this test.
-    rms_norm_llama3 = llama3_rms_norm(data_np, weights_np, eps, use_jit=False)
+    rms_norm_llama3 = llama3_rms_norm(data_np, weights_np, eps)
 
     # 2. Compute RMSNorm using Hugging Face LlamaRMSNorm
     # Instantiate HF LlamaRMSNorm with the specific dimension and epsilon
