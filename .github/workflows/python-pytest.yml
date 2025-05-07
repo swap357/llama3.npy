@@ -2,16 +2,17 @@ name: Python Pytest Suite
 
 on:
   push:
-    branches: [ main ] # Or your default branch
+    branches: [ main ]
   pull_request:
-    branches: [ main ] # Or your default branch
+    branches: [ main ]
 
 jobs:
   test:
+    name: pytest
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.11'] # You can add other Python versions like '3.9', '3.10', '3.12'
+        python-version: ['3.12']
 
     steps:
     - name: Checkout repository
@@ -31,7 +32,6 @@ jobs:
       run: |
         pytest
 
-    # Optional: Upload test results (if you generate reports)
     - name: Upload pytest test results
       if: always()
       uses: actions/upload-artifact@v4
