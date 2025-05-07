@@ -36,7 +36,7 @@ jobs:
     # Optional: Upload test results (if you generate reports)
     - name: Upload pytest test results
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: pytest-results-${{ matrix.python-version }}
         path: pytest_results.xml
