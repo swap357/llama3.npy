@@ -26,8 +26,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        # You might need to install PyTorch with specific CUDA versions if using GPU runners later
-        # For CPU-only tests, the pip install from requirements should be fine.
+        if [ -f requirements-hf.txt ]; then pip install -r requirements-hf.txt; fi
 
     - name: Run pytest
       run: |
