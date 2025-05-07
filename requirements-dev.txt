@@ -1,0 +1,6 @@
+pytest
+numpy
+torch
+transformers
+sentencepiece
+numba
