@@ -1,0 +1,42 @@
+name: Python Pytest Suite
+
+on:
+  push:
+    branches: [ main ] # Or your default branch
+  pull_request:
+    branches: [ main ] # Or your default branch
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11'] # You can add other Python versions like '3.9', '3.10', '3.12'
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        # You might need to install PyTorch with specific CUDA versions if using GPU runners later
+        # For CPU-only tests, the pip install from requirements should be fine.
+
+    - name: Run pytest
+      run: |
+        pytest
+
+    # Optional: Upload test results (if you generate reports)
+    - name: Upload pytest test results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: pytest-results-${{ matrix.python-version }}
+        path: pytest_results.xml

@@ -81,7 +81,7 @@ def generate_text_manual(prompt: str, args: ModelArgs = None) -> str:
             # 2. Process through each layer
             for layer_idx in range(model.config.num_hidden_layers):
                 layer = model.model.layers[layer_idx]
-                
+
                 # A. Input Layer Normalization (2048 -> 2048)
                 norm_out = layer.input_layernorm(hidden_states)
 
@@ -167,14 +167,17 @@ def generate_text_manual(prompt: str, args: ModelArgs = None) -> str:
 
 
 def main():
+    hf_args = ModelArgs()
     parser = argparse.ArgumentParser(description="Generate text and save intermediate tensor statistics")
     parser.add_argument('--prompt', type=str, default="Once upon a time", help="Input prompt for generation")
-    parser.add_argument('--max-new-tokens', type=int, default=10, help="Maximum number of tokens to generate")
-    
+    parser.add_argument('--max-new-tokens', type=int, default=hf_args.max_new_tokens, help="Maximum number of tokens to generate")
+    parser.add_argument('--seed', type=int, default=hf_args.seed, help="Random seed for reproducibility")
     args_cli = parser.parse_args()
 
-    hf_args = ModelArgs()
-    hf_args.max_new_tokens = args_cli.max_new_tokens
+    if args_cli.max_new_tokens is not None:
+        hf_args.max_new_tokens = args_cli.max_new_tokens
+    if args_cli.seed is not None:
+        hf_args.seed = args_cli.seed
 
     torch.manual_seed(hf_args.seed)
     torch.cuda.manual_seed(hf_args.seed)

@@ -38,7 +38,10 @@ def generate(prompt=None, args=None):
         **inputs,
         max_new_tokens=args.max_new_tokens,
         streamer=streamer,
-        do_sample=args.do_sample
+        do_sample=args.do_sample,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        top_p=args.top_p
     )
     elapsed = time.time() - start
 

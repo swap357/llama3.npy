@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import os
 import numpy as np
+import torch
 
 # Base directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +18,10 @@ USE_FLOAT32 = True   # Use float32 as default
 
 if USE_FLOAT32:
     NP_DTYPE = np.float32
+    TORCH_DTYPE = torch.float32
+else:
+    NP_DTYPE = np.float16
+    TORCH_DTYPE = torch.float16
 
 @dataclass
 class ModelArgs:
@@ -26,15 +31,17 @@ class ModelArgs:
         self.n_layers = 16           # Number of layers
         self.n_heads = 32            # Number of attention heads
         self.n_kv_heads = 8          # Number of key/value heads (GQA)
-        self.head_dim = 64           # Head dimension
+        self.head_dim = 64           # Head dimension (dim / n_heads)
         self.vocab_size = 128256     # Vocabulary size
         self.norm_eps = 1e-5         # Normalization epsilon
-        
+        self.rope_theta: float = 10000.0
+        self.multiple_of: int = 256
+
         # Runtime parameters
         self.max_batch_size = 1      # Batch size for inference
         self.max_seq_len = 256       # Maximum sequence length
         self.max_new_tokens = 150    # Maximum new tokens to generate
-        
+
         # Generation parameters (deterministic mode)
         self.do_sample = False       # Using greedy decoding
         self.num_beams = 1           # Single beam for greedy decoding
@@ -43,11 +50,12 @@ class ModelArgs:
         self.top_k = 1               # Top-k sampling (not used in deterministic mode)
         self.top_p = 1.0             # Top-p sampling (not used in deterministic mode)
         self.repetition_penalty = 1.0 # Repetition penalty (not used in deterministic mode)
-        
+
         # Special tokens (matching HuggingFace tokenizer)
         self.bos_token_id = 128000   # Beginning of sequence token ID
         self.eos_token_id = 128001   # End of sequence token ID
         self.pad_token_id = -1       # Padding token ID
-        
+
         # Data type
-        self.dtype = NP_DTYPE        # For numpy implementation        self.torch_dtype = TORCH_DTYPE  # For PyTorch implementation
+        self.dtype = NP_DTYPE        # For numpy implementation
+        self.torch_dtype = TORCH_DTYPE  # For PyTorch implementation
