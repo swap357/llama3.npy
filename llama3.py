@@ -53,54 +53,74 @@ def compute_cos_sin_cache(head_dim, max_seq_len, base=10000):
     """
     Precomputes cosine and sine values for rotary position embeddings.
 
-    Formula:
-        inv_freq = 1 / (base^(2i/d)) for i in [0, 2, 4, ..., d-2]
-        θ_t,i = t * inv_freq_i
-        cos(θ_t,i) and sin(θ_t,i) for all positions t and dimensions i
+    Args:
+        head_dim: Dimension of each attention head
+        max_seq_len: Maximum sequence length to precompute
+        base: Base value for the inverse frequency calculations (rope_theta)
 
-    Shape:
-        output: (max_seq_len, head_dim/2), (max_seq_len, head_dim/2)
-            where the first array contains cosine values and the second contains sine values
+    Returns:
+        cos, sin: Precomputed cosine and sine tensors for rotary embeddings
     """
+    # Create inverse frequency tensor
     inv_freq = 1.0 / (base ** (np.arange(0, head_dim, 2, dtype=np.float32) / head_dim))
-    t = np.arange(max_seq_len, dtype=np.float32)
-    freqs = np.outer(t, inv_freq)
-    return np.cos(freqs).astype(model_config.NP_DTYPE), np.sin(freqs).astype(model_config.NP_DTYPE)
 
-def apply_rotary_emb(xq, xk, cos, sin):
+    # Create position tensor for each position up to max_seq_len
+    t = np.arange(max_seq_len, dtype=np.float32)
+
+    # Compute freqs = t * inv_freq (for each position and dim)
+    freqs = np.outer(t, inv_freq)
+
+    # Compute cos and sin
+    cos = np.cos(freqs).astype(model_config.NP_DTYPE)
+    sin = np.sin(freqs).astype(model_config.NP_DTYPE)
+
+    return cos, sin
+
+def apply_rotary_emb(q, k, cos, sin, unsqueeze_dim=1):
     """
     Applies rotary positional embeddings to the query and key tensors.
 
-    Formula for each dimension pair (dim_i, dim_i+1):
-        x_rotated_dim_i = x_dim_i * cos - x_dim_i+1 * sin
-        x_rotated_dim_i+1 = x_dim_i * sin + x_dim_i+1 * cos
+    Args:
+        q: Query tensor of shape (..., head_dim)
+        k: Key tensor of shape (..., head_dim) 
+        cos: Cosine part of the rotary embedding
+        sin: Sine part of the rotary embedding
+        unsqueeze_dim: Dimension along which to unsqueeze cos and sin
 
-    Shape:
-        xq: (batch_size, seq_len, n_heads, head_dim)
-        xk: (batch_size, seq_len, n_kv_heads, head_dim)
-        cos: (seq_len, head_dim/2)
-        sin: (seq_len, head_dim/2)
-        output: rotated xq and xk with same shapes as input
+    Returns:
+        q_embed, k_embed: Rotated query and key tensors with same shape as input
     """
-    # Expand dimensions of cos and sin for broadcasting
-    cos_expanded = np.expand_dims(cos, (0, 2))
-    sin_expanded = np.expand_dims(sin, (0, 2))
+    # Extract even and odd dimensions
+    q_even = q[..., ::2]
+    q_odd = q[..., 1::2]
+    k_even = k[..., ::2]
+    k_odd = k[..., 1::2]
 
-    # Extract even and odd indices for both query and key tensors
-    xq_even, xq_odd = xq[..., ::2], xq[..., 1::2]
-    xk_even, xk_odd = xk[..., ::2], xk[..., 1::2]
+    # Handle the specific case for our broadcasting pattern
+    if unsqueeze_dim == 0 and len(cos.shape) == 3:  # (batch_size, seq_len, head_dim/2)
+        # Reshape for (batch_size, seq_len, n_heads, head_dim)
+        cos = cos[:, :, None, :]
+        sin = sin[:, :, None, :]
+    else:
+        # Default unsqueeze for other cases
+        cos = np.expand_dims(cos, axis=unsqueeze_dim)
+        sin = np.expand_dims(sin, axis=unsqueeze_dim)
 
-    # Apply rotation to query tensor
-    xq_rotated_even = xq_even * cos_expanded - xq_odd * sin_expanded
-    xq_rotated_odd = xq_even * sin_expanded + xq_odd * cos_expanded
-    xq_rotated = np.stack([xq_rotated_even, xq_rotated_odd], axis=-1).reshape(xq.shape)
+    # Apply rotation
+    q_rot_even = q_even * cos - q_odd * sin
+    q_rot_odd = q_even * sin + q_odd * cos
+    k_rot_even = k_even * cos - k_odd * sin
+    k_rot_odd = k_even * sin + k_odd * cos
 
-    # Apply rotation to key tensor
-    xk_rotated_even = xk_even * cos_expanded - xk_odd * sin_expanded
-    xk_rotated_odd = xk_even * sin_expanded + xk_odd * cos_expanded
-    xk_rotated = np.stack([xk_rotated_even, xk_rotated_odd], axis=-1).reshape(xk.shape)
+    # Recombine rotated values
+    q_embed = np.zeros_like(q)
+    k_embed = np.zeros_like(k)
+    q_embed[..., ::2] = q_rot_even
+    q_embed[..., 1::2] = q_rot_odd
+    k_embed[..., ::2] = k_rot_even
+    k_embed[..., 1::2] = k_rot_odd
 
-    return xq_rotated, xk_rotated
+    return q_embed, k_embed
 
 def rms_norm(x, weight, eps):
     """
@@ -141,7 +161,8 @@ def attention(x, q_weight, k_weight, v_weight, o_weight, mask, cos, sin,
     xk = xk.reshape(b, t, n_kv_heads, head_dim)
     xv = xv.reshape(b, t, n_kv_heads, head_dim)
 
-    xq, xk = apply_rotary_emb(xq, xk, cos, sin)
+    # Apply rotary embeddings to queries and keys
+    xq, xk = apply_rotary_emb(xq, xk, cos, sin, unsqueeze_dim=0)
 
     if n_heads > n_kv_heads:
         rep = n_heads // n_kv_heads
@@ -223,13 +244,15 @@ def transformer_block(x, layer_weights, mask, cos, sin, n_heads, n_kv_heads, hea
 
     return block_output
 
-def forward(input_ids, weights, args, cos, sin):
+def forward(input_ids, weights, args, cos, sin, position_ids=None):
     """
     Forward pass through the entire model.
 
     Shape:
         input_ids: (batch_size, seq_len)
         weights: dict containing all model parameters
+        cos, sin: Precomputed cosine and sine for position embeddings
+        position_ids: Optional position IDs, defaults to incremental positions
         output: logits with shape (batch_size, 1, vocab_size)
     """
     b, t = input_ids.shape
@@ -239,11 +262,23 @@ def forward(input_ids, weights, args, cos, sin):
 
     hidden = embed[input_ids]
 
+    # Set up causal mask
     mask = None
     if t > 1:
         mask = np.triu(np.full((t, t), float("-inf"), dtype=model_config.NP_DTYPE), 1)
 
-    cos_t, sin_t = cos[:t], sin[:t]
+    # Create position IDs if not provided
+    if position_ids is None:
+        position_ids = np.arange(t, dtype=np.int64)[np.newaxis, :]
+    
+    # Get position embeddings for the current sequence length
+    # Ensure position_ids are within bounds of cos/sin
+    max_pos = cos.shape[0]
+    safe_pos_ids = np.minimum(position_ids, max_pos - 1)
+    
+    # Get the cos/sin values for the current positions
+    cos_t = cos[safe_pos_ids]
+    sin_t = sin[safe_pos_ids]
 
     for i in range(args.n_layers):
         hidden = transformer_block(
@@ -269,9 +304,14 @@ def generate(input_ids, max_new_tokens, weights, args, cos, sin):
     np.random.seed(args.seed)
     generated_ids = []
     current_input_ids = input_ids.copy()
+    seq_length = t
 
     for i in range(max_new_tokens):
-        logits = forward(current_input_ids, weights, args, cos, sin)
+        # Create position IDs for the current sequence
+        position_ids = np.arange(seq_length, dtype=np.int64)[np.newaxis, :]
+
+        # Get logits from forward pass
+        logits = forward(current_input_ids, weights, args, cos, sin, position_ids)
 
         if args.do_sample:
             logits_last = logits[:, -1, :] / args.temperature
@@ -284,6 +324,7 @@ def generate(input_ids, max_new_tokens, weights, args, cos, sin):
 
         current_input_ids = np.concatenate([current_input_ids, next_id], axis=1)
         generated_ids.append(next_id[0, 0].item())
+        seq_length += 1
 
         yield next_id
 
@@ -291,12 +332,26 @@ def initialize_model(path, args):
     """
     Initializes the model by loading weights and precomputing position embeddings.
 
+    Args:
+        path: Path to model weights file
+        args: Model configuration arguments
+
     Returns:
         weights: dict of model parameters
-        cos, sin: arrays of shape (max_seq_len, head_dim/2) for rotary embeddings
+        cos, sin: arrays for rotary embeddings
     """
     weights = model_utils.load_parameters(path)
-    cos, sin = compute_cos_sin_cache(args.dim // args.n_heads, args.max_seq_len)
+
+    # Set up rotary embeddings using theta from config
+    head_dim = args.dim // args.n_heads
+    base = getattr(args, "rope_theta", 10000.0)
+
+    cos, sin = compute_cos_sin_cache(
+        head_dim=head_dim, 
+        max_seq_len=args.max_seq_len,
+        base=base
+    )
+
     return weights, cos, sin
 
 if __name__ == '__main__':
