@@ -48,77 +48,58 @@ def silu(x):
     x = np.clip(x, -88.0, 88.0)
     return x * (1.0 / (1.0 + np.exp(-x)))
 
-
-def compute_cos_sin_cache(head_dim, max_seq_len, base=10000):
+def apply_rotary_emb(q, k, position_ids, head_dim, base=10000.0):
     """
-    Precomputes cosine and sine values for rotary position embeddings.
+    Applies rotary positional embeddings to the query and key tensors on-the-fly.
 
     Args:
+        q: Query tensor of shape (batch, seq_len, n_heads, head_dim)
+        k: Key tensor of shape (batch, seq_len, n_kv_heads, head_dim) 
+        position_ids: Positions tensor of shape (batch, seq_len)
         head_dim: Dimension of each attention head
-        max_seq_len: Maximum sequence length to precompute
         base: Base value for the inverse frequency calculations (rope_theta)
-
-    Returns:
-        cos, sin: Precomputed cosine and sine tensors for rotary embeddings
-    """
-    # Create inverse frequency tensor
-    inv_freq = 1.0 / (base ** (np.arange(0, head_dim, 2, dtype=np.float32) / head_dim))
-
-    # Create position tensor for each position up to max_seq_len
-    t = np.arange(max_seq_len, dtype=np.float32)
-
-    # Compute freqs = t * inv_freq (for each position and dim)
-    freqs = np.outer(t, inv_freq)
-
-    # Compute cos and sin
-    cos = np.cos(freqs).astype(model_config.NP_DTYPE)
-    sin = np.sin(freqs).astype(model_config.NP_DTYPE)
-
-    return cos, sin
-
-def apply_rotary_emb(q, k, cos, sin, unsqueeze_dim=1):
-    """
-    Applies rotary positional embeddings to the query and key tensors.
-
-    Args:
-        q: Query tensor of shape (..., head_dim)
-        k: Key tensor of shape (..., head_dim) 
-        cos: Cosine part of the rotary embedding
-        sin: Sine part of the rotary embedding
-        unsqueeze_dim: Dimension along which to unsqueeze cos and sin
 
     Returns:
         q_embed, k_embed: Rotated query and key tensors with same shape as input
     """
-    # Extract even and odd dimensions
-    q_even = q[..., ::2]
-    q_odd = q[..., 1::2]
-    k_even = k[..., ::2]
-    k_odd = k[..., 1::2]
+    # Create inverse frequency tensor - only need half the dimensions
+    half_dim = head_dim // 2
+    inv_freq = 1.0 / (base ** (np.arange(0, half_dim, dtype=np.float32) / half_dim))
 
-    # Handle the specific case for our broadcasting pattern
-    if unsqueeze_dim == 0 and len(cos.shape) == 3:  # (batch_size, seq_len, head_dim/2)
-        # Reshape for (batch_size, seq_len, n_heads, head_dim)
-        cos = cos[:, :, None, :]
-        sin = sin[:, :, None, :]
-    else:
-        # Default unsqueeze for other cases
-        cos = np.expand_dims(cos, axis=unsqueeze_dim)
-        sin = np.expand_dims(sin, axis=unsqueeze_dim)
+    # Get the shapes
+    batch, seq_len, n_heads, _ = q.shape
 
-    # Apply rotation
-    q_rot_even = q_even * cos - q_odd * sin
-    q_rot_odd = q_even * sin + q_odd * cos
-    k_rot_even = k_even * cos - k_odd * sin
-    k_rot_odd = k_even * sin + k_odd * cos
+    # Split the head dimension into half for processing
+    q_half1 = q[..., :half_dim]
+    q_half2 = q[..., half_dim:]
 
-    # Recombine rotated values
-    q_embed = np.zeros_like(q)
-    k_embed = np.zeros_like(k)
-    q_embed[..., ::2] = q_rot_even
-    q_embed[..., 1::2] = q_rot_odd
-    k_embed[..., ::2] = k_rot_even
-    k_embed[..., 1::2] = k_rot_odd
+    k_half1 = k[..., :half_dim]
+    k_half2 = k[..., half_dim:]
+
+    # Compute the freqs, cos, and sin values
+    position_ids = position_ids.reshape(batch, seq_len)
+    # Shape: (batch, seq_len, half_dim)
+    freqs = position_ids[..., None] * inv_freq[None, None, :]
+
+    # Compute cos and sin: (batch, seq_len, half_dim)
+    cos = np.cos(freqs)
+    sin = np.sin(freqs)
+
+    # Reshape cos and sin for broadcasting with q and k
+    # Shape: (batch, seq_len, 1, half_dim)
+    cos = cos[:, :, None, :]
+    sin = sin[:, :, None, :]
+
+    # Apply the rotation
+    q_out_half1 = q_half1 * cos - q_half2 * sin
+    q_out_half2 = q_half2 * cos + q_half1 * sin
+
+    k_out_half1 = k_half1 * cos - k_half2 * sin
+    k_out_half2 = k_half2 * cos + k_half1 * sin
+
+    # Concatenate the halves
+    q_embed = np.concatenate([q_out_half1, q_out_half2], axis=-1)
+    k_embed = np.concatenate([k_out_half1, k_out_half2], axis=-1)
 
     return q_embed, k_embed
 
@@ -135,8 +116,9 @@ def rms_norm(x, weight, eps):
     """
     return x / np.sqrt(np.mean(x ** 2, axis=-1, keepdims=True) + eps) * weight
 
-def attention(x, q_weight, k_weight, v_weight, o_weight, mask, cos, sin,
-              n_heads, n_kv_heads, head_dim, scale, layer_idx):
+
+def attention(x, q_weight, k_weight, v_weight, o_weight, mask, position_ids,
+              n_heads, n_kv_heads, head_dim, scale, layer_idx, base=10000.0):
     """
     Multi-head attention with grouped-query attention (GQA).
 
@@ -151,7 +133,7 @@ def attention(x, q_weight, k_weight, v_weight, o_weight, mask, cos, sin,
         k_weight: (dim, n_kv_heads * head_dim)
         v_weight: (dim, n_kv_heads * head_dim)
         o_weight: (n_heads * head_dim, dim)
-        cos, sin: (seq_len, head_dim/2)
+        position_ids: (batch_size, seq_len)
         output: (batch_size, seq_len, dim)
     """
     b, t = x.shape[:2]
@@ -161,8 +143,8 @@ def attention(x, q_weight, k_weight, v_weight, o_weight, mask, cos, sin,
     xk = xk.reshape(b, t, n_kv_heads, head_dim)
     xv = xv.reshape(b, t, n_kv_heads, head_dim)
 
-    # Apply rotary embeddings to queries and keys
-    xq, xk = apply_rotary_emb(xq, xk, cos, sin, unsqueeze_dim=0)
+    # Apply rotary embeddings to queries and keys (on-the-fly)
+    xq, xk = apply_rotary_emb(xq, xk, position_ids, head_dim, base)
 
     if n_heads > n_kv_heads:
         rep = n_heads // n_kv_heads
@@ -180,6 +162,7 @@ def attention(x, q_weight, k_weight, v_weight, o_weight, mask, cos, sin,
     final_out = (out.transpose(0, 2, 1, 3).reshape(b, t, -1)) @ o_weight.T
 
     return final_out
+
 
 def feed_forward(x, up_weight, gate_weight, down_weight):
     """
@@ -203,7 +186,7 @@ def feed_forward(x, up_weight, gate_weight, down_weight):
     ffn_out = (swish * up_proj) @ down
     return ffn_out
 
-def transformer_block(x, layer_weights, mask, cos, sin, n_heads, n_kv_heads, head_dim, norm_eps, layer_idx):
+def transformer_block(x, layer_weights, mask, position_ids, n_heads, n_kv_heads, head_dim, norm_eps, layer_idx, base=10000.0):
     """
     Single transformer layer with attention and feed-forward network.
 
@@ -214,7 +197,7 @@ def transformer_block(x, layer_weights, mask, cos, sin, n_heads, n_kv_heads, hea
     Shape:
         x: (batch_size, seq_len, dim)
         layer_weights: dict containing all layer parameters
-        cos, sin: (seq_len, head_dim/2)
+        position_ids: (batch_size, seq_len)
         output: (batch_size, seq_len, dim)
     """
     prefix = f"model.layers.{layer_idx}."
@@ -235,7 +218,7 @@ def transformer_block(x, layer_weights, mask, cos, sin, n_heads, n_kv_heads, hea
     scale = 1.0 / math.sqrt(head_dim)
 
     attn_out = attention(norm_x, q_weight, k_weight, v_weight, o_weight,
-                         mask, cos, sin, n_heads, n_kv_heads, head_dim, scale, layer_idx)
+                         mask, position_ids, n_heads, n_kv_heads, head_dim, scale, layer_idx, base)
 
     h = x + attn_out
     norm_h = rms_norm(h, ln2_weight, norm_eps)
@@ -244,14 +227,13 @@ def transformer_block(x, layer_weights, mask, cos, sin, n_heads, n_kv_heads, hea
 
     return block_output
 
-def forward(input_ids, weights, args, cos, sin, position_ids=None):
+def forward(input_ids, weights, args, position_ids=None):
     """
     Forward pass through the entire model.
 
     Shape:
         input_ids: (batch_size, seq_len)
         weights: dict containing all model parameters
-        cos, sin: Precomputed cosine and sine for position embeddings
         position_ids: Optional position IDs, defaults to incremental positions
         output: logits with shape (batch_size, 1, vocab_size)
     """
@@ -270,21 +252,15 @@ def forward(input_ids, weights, args, cos, sin, position_ids=None):
     # Create position IDs if not provided
     if position_ids is None:
         position_ids = np.arange(t, dtype=np.int64)[np.newaxis, :]
-    
-    # Get position embeddings for the current sequence length
-    # Ensure position_ids are within bounds of cos/sin
-    max_pos = cos.shape[0]
-    safe_pos_ids = np.minimum(position_ids, max_pos - 1)
-    
-    # Get the cos/sin values for the current positions
-    cos_t = cos[safe_pos_ids]
-    sin_t = sin[safe_pos_ids]
+
+    # Get the base value for rotary embeddings
+    base = getattr(args, "rope_theta", 10000.0)
 
     for i in range(args.n_layers):
         hidden = transformer_block(
-            hidden, weights, mask, cos_t, sin_t,
+            hidden, weights, mask, position_ids,
             args.n_heads, args.n_kv_heads or args.n_heads, args.dim // args.n_heads,
-            args.norm_eps, i
+            args.norm_eps, i, base
         )
 
     final_norm = rms_norm(hidden, norm_weight, args.norm_eps)
@@ -292,7 +268,7 @@ def forward(input_ids, weights, args, cos, sin, position_ids=None):
 
     return logits
 
-def generate(input_ids, max_new_tokens, weights, args, cos, sin):
+def generate(input_ids, max_new_tokens, weights, args):
     """
     Autoregressive token generation.
 
@@ -311,7 +287,7 @@ def generate(input_ids, max_new_tokens, weights, args, cos, sin):
         position_ids = np.arange(seq_length, dtype=np.int64)[np.newaxis, :]
 
         # Get logits from forward pass
-        logits = forward(current_input_ids, weights, args, cos, sin, position_ids)
+        logits = forward(current_input_ids, weights, args, position_ids)
 
         if args.do_sample:
             logits_last = logits[:, -1, :] / args.temperature
@@ -330,7 +306,7 @@ def generate(input_ids, max_new_tokens, weights, args, cos, sin):
 
 def initialize_model(path, args):
     """
-    Initializes the model by loading weights and precomputing position embeddings.
+    Initializes the model by loading weights.
 
     Args:
         path: Path to model weights file
@@ -338,21 +314,10 @@ def initialize_model(path, args):
 
     Returns:
         weights: dict of model parameters
-        cos, sin: arrays for rotary embeddings
     """
     weights = model_utils.load_parameters(path)
+    return weights
 
-    # Set up rotary embeddings using theta from config
-    head_dim = args.dim // args.n_heads
-    base = getattr(args, "rope_theta", 10000.0)
-
-    cos, sin = compute_cos_sin_cache(
-        head_dim=head_dim, 
-        max_seq_len=args.max_seq_len,
-        base=base
-    )
-
-    return weights, cos, sin
 
 if __name__ == '__main__':
     import argparse
@@ -369,14 +334,14 @@ if __name__ == '__main__':
 
     tokenizer = model_tokenizer.Tokenizer(model_config.NP_TOKENIZER_PATH)
 
-    weights, cos, sin = initialize_model(model_config.NP_MODEL_PATH, args)
+    weights = initialize_model(model_config.NP_MODEL_PATH, args)
     input_ids = np.array([tokenizer.encode(args_cli.prompt)])
 
     print(f"\n{args_cli.prompt}", end="")
     start = time.time()
     token_count = input_ids.shape[1]
 
-    for token in generate(input_ids, args.max_new_tokens, weights, args, cos, sin):
+    for token in generate(input_ids, args.max_new_tokens, weights, args):
         token_count += 1
         tok_id = token[0, 0].item()
         if tok_id in [tokenizer.eos_id, tokenizer.bos_id]:
