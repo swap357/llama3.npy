@@ -153,7 +153,7 @@ def test_implementation_comparison():
     test_np_dtype = data['test_np_dtype'] # Should be np.float64
 
     half_dim = head_dim // 2
-    
+
     # inv_freq calculation matching llama3.py's internal precision (np.float32 for arange part)
     inv_freq_arange = np.arange(0, half_dim, dtype=np.float32)
     inv_freq = 1.0 / (base ** (inv_freq_arange / half_dim)) # inv_freq is np.float32 here
@@ -161,10 +161,10 @@ def test_implementation_comparison():
     # 't' represents sequential positions (0 to seq_len-1), mimicking position_ids for cache generation.
     # position_ids are int64 in llama3.py.
     t = np.arange(seq_len, dtype=np.int64) 
-    
+
     # Calculate freqs: np.outer(int64, float32) -> float64
     freqs = np.outer(t, inv_freq) # Shape: (seq_len, half_dim)
-    
+
     # Calculate cos and sin, then cast to the test's numpy dtype (e.g., float64)
     cos_active_half_for_hf = np.cos(freqs).astype(test_np_dtype)
     sin_active_half_for_hf = np.sin(freqs).astype(test_np_dtype)
@@ -198,10 +198,10 @@ def test_implementation_comparison():
     assert xk_rotated_llama3.shape == xk_rotated_hf_np.shape, \
         f"Output key shapes don't match between implementations"
 
-    assert np.allclose(xq_rotated_llama3, xq_rotated_hf_np, atol=1e-6, rtol=1.0), \
-        "Query rotated values are not functionally equivalent between implementations"
-    assert np.allclose(xk_rotated_llama3, xk_rotated_hf_np, atol=1e-6, rtol=1.0), \
-        "Key rotated values are not functionally equivalent between implementations"
+    assert np.array_equal(xq_rotated_llama3, xq_rotated_hf_np), \
+        "Query rotated values are not bit-for-bit identical between implementations"
+    assert np.array_equal(xk_rotated_llama3, xk_rotated_hf_np), \
+        "Key rotated values are not bit-for-bit identical between implementations"
 
 if __name__ == "__main__":
     pytest.main([__file__])
