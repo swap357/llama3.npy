@@ -41,7 +41,7 @@ def test_rms_norm():
     with torch.no_grad():
         hf_rms_norm_layer.weight.copy_(weights_torch)
 
-    hf_rms_norm_layer.eval() # Set to evaluation mode
+    hf_rms_norm_layer.eval()
     with torch.no_grad():
         rms_norm_hf_torch = hf_rms_norm_layer(data_torch)
     rms_norm_hf_np = rms_norm_hf_torch.cpu().numpy()
