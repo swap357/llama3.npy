@@ -82,11 +82,25 @@ def apply_rotary_emb(xq, xk, cos, sin):
         sin: (seq_len, head_dim/2)
         output: rotated xq and xk with same shapes as input
     """
-    def rotate(x):
-        x_r, x_i = x[..., ::2], x[..., 1::2]
-        return np.stack([x_r * cos - x_i * sin, x_r * sin + x_i * cos], axis=-1).reshape(x.shape)
-    cos, sin = np.expand_dims(cos, (0, 2)), np.expand_dims(sin, (0, 2))
-    return rotate(xq), rotate(xk)
+    # Expand dimensions of cos and sin for broadcasting
+    cos_expanded = np.expand_dims(cos, (0, 2))
+    sin_expanded = np.expand_dims(sin, (0, 2))
+
+    # Extract even and odd indices for both query and key tensors
+    xq_even, xq_odd = xq[..., ::2], xq[..., 1::2]
+    xk_even, xk_odd = xk[..., ::2], xk[..., 1::2]
+
+    # Apply rotation to query tensor
+    xq_rotated_even = xq_even * cos_expanded - xq_odd * sin_expanded
+    xq_rotated_odd = xq_even * sin_expanded + xq_odd * cos_expanded
+    xq_rotated = np.stack([xq_rotated_even, xq_rotated_odd], axis=-1).reshape(xq.shape)
+
+    # Apply rotation to key tensor
+    xk_rotated_even = xk_even * cos_expanded - xk_odd * sin_expanded
+    xk_rotated_odd = xk_even * sin_expanded + xk_odd * cos_expanded
+    xk_rotated = np.stack([xk_rotated_even, xk_rotated_odd], axis=-1).reshape(xk.shape)
+
+    return xq_rotated, xk_rotated
 
 def rms_norm(x, weight, eps):
     """
