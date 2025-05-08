@@ -5,7 +5,6 @@ import torch
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb as hf_apply_rotary_pos_emb
 import numpy as np
 
-from llama3 import compute_cos_sin_cache as llama3_compute_cos_sin_cache
 from llama3 import apply_rotary_emb as llama3_apply_rotary_emb
 from config import ModelArgs
 
@@ -18,7 +17,7 @@ def setup_rotary_test_data(seed=42):
 
     This function sets up the test environment by:
     1. Initializing model parameters (dimensions, sizes)
-    2. Creating cosine/sine position embeddings
+    2. Generating position_ids
     3. Generating random query and key tensors
 
     Returns a dictionary with all necessary test data.
@@ -39,10 +38,8 @@ def setup_rotary_test_data(seed=42):
     # Set random seed for reproducibility
     np.random.seed(seed)
 
-    # Generate cosine/sine cache for positional encoding
-    cos_cache_half, sin_cache_half = llama3_compute_cos_sin_cache(head_dim, args.max_seq_len, base)
-    cos_active_half = cos_cache_half[:seq_len].astype(test_np_dtype)
-    sin_active_half = sin_cache_half[:seq_len].astype(test_np_dtype)
+    # Generate position_ids
+    position_ids_np = np.tile(np.arange(seq_len, dtype=np.int64), (batch_size, 1))
 
     # Generate query and key tensors with random values
     # Shape: (batch_size, seq_len, num_heads, head_dim)
@@ -60,32 +57,10 @@ def setup_rotary_test_data(seed=42):
         'base': base,
         'test_np_dtype': test_np_dtype,
         'test_torch_dtype': test_torch_dtype,
-        'cos_cache_half': cos_cache_half,
-        'sin_cache_half': sin_cache_half,
-        'cos_active_half': cos_active_half,
-        'sin_active_half': sin_active_half,
+        'position_ids_np': position_ids_np,
         'xq_np': xq_np,
         'xk_np': xk_np
     }
-
-def test_cos_sin_cache_shapes():
-    """
-    Test the shapes of cos/sin cache generated for rotary embeddings.
-
-    Rotary Position Encoding (RoPE) uses a cache of cosine and sine values.
-    This test verifies that the cache has the expected dimensions.
-    """
-    data = setup_rotary_test_data()
-
-    # Check cos/sin cache shapes
-    assert data['cos_cache_half'].shape == (data['args'].max_seq_len, data['head_dim'] // 2), \
-        f"Unexpected cos cache shape: {data['cos_cache_half'].shape}"
-    assert data['sin_cache_half'].shape == (data['args'].max_seq_len, data['head_dim'] // 2), \
-        f"Unexpected sin cache shape: {data['sin_cache_half'].shape}"
-    assert data['cos_active_half'].shape == (data['seq_len'], data['head_dim'] // 2), \
-        f"Unexpected active cos cache shape: {data['cos_active_half'].shape}"
-    assert data['sin_active_half'].shape == (data['seq_len'], data['head_dim'] // 2), \
-        f"Unexpected active sin cache shape: {data['sin_active_half'].shape}"
 
 def test_query_key_shapes():
     """
@@ -100,8 +75,9 @@ def test_query_key_shapes():
     xq_rotated, xk_rotated = llama3_apply_rotary_emb(
         data['xq_np'].copy(),
         data['xk_np'].copy(),
-        data['cos_active_half'],
-        data['sin_active_half']
+        data['position_ids_np'],
+        data['head_dim'],
+        data['base']
     )
 
     # Verify output shapes match input shapes
@@ -127,8 +103,9 @@ def test_data_transformation():
     xq_rotated, xk_rotated = llama3_apply_rotary_emb(
         data['xq_np'].copy(),
         data['xk_np'].copy(),
-        data['cos_active_half'],
-        data['sin_active_half']
+        data['position_ids_np'],
+        data['head_dim'],
+        data['base']
     )
 
     # Check that the data has actually been transformed
@@ -154,8 +131,9 @@ def test_implementation_comparison():
     xq_rotated_llama3, xk_rotated_llama3 = llama3_apply_rotary_emb(
         data['xq_np'].copy(),
         data['xk_np'].copy(),
-        data['cos_active_half'],
-        data['sin_active_half']
+        data['position_ids_np'],
+        data['head_dim'],
+        data['base']
     )
 
     # Apply HuggingFace's rotary embeddings
@@ -165,15 +143,41 @@ def test_implementation_comparison():
     xk_torch = torch.from_numpy(data['xk_np'].copy()).to(data['test_torch_dtype']).permute(0, 2, 1, 3)
 
     # Step 2: Prepare position embeddings for HF
-    # HF expects full-sized embeddings, so we duplicate the half-sized ones
-    cos_full = np.concatenate([data['cos_active_half'], data['cos_active_half']], axis=-1)
-    sin_full = np.concatenate([data['sin_active_half'], data['sin_active_half']], axis=-1)
-
-    # Convert to torch tensors and add batch dimension
+    # HF's apply_rotary_pos_emb expects precomputed sin/cos.
+    # We generate these to match what our llama3_apply_rotary_emb does internally
+    # for the given sequence length and parameters.
+    head_dim = data['head_dim']
+    base = data['base']
+    seq_len = data['seq_len']
     batch_size = data['batch_size']
+    test_np_dtype = data['test_np_dtype'] # Should be np.float64
+
+    half_dim = head_dim // 2
+    
+    # inv_freq calculation matching llama3.py's internal precision (np.float32 for arange part)
+    inv_freq_arange = np.arange(0, half_dim, dtype=np.float32)
+    inv_freq = 1.0 / (base ** (inv_freq_arange / half_dim)) # inv_freq is np.float32 here
+
+    # 't' represents sequential positions (0 to seq_len-1), mimicking position_ids for cache generation.
+    # position_ids are int64 in llama3.py.
+    t = np.arange(seq_len, dtype=np.int64) 
+    
+    # Calculate freqs: np.outer(int64, float32) -> float64
+    freqs = np.outer(t, inv_freq) # Shape: (seq_len, half_dim)
+    
+    # Calculate cos and sin, then cast to the test's numpy dtype (e.g., float64)
+    cos_active_half_for_hf = np.cos(freqs).astype(test_np_dtype)
+    sin_active_half_for_hf = np.sin(freqs).astype(test_np_dtype)
+
+    # HF expects full-sized embeddings, so concatenate the halves
+    cos_full = np.concatenate([cos_active_half_for_hf, cos_active_half_for_hf], axis=-1) # Shape: (seq_len, head_dim)
+    sin_full = np.concatenate([sin_active_half_for_hf, sin_active_half_for_hf], axis=-1) # Shape: (seq_len, head_dim)
+
+    # Convert to torch tensors and add batch dimension for HF function
     cos_torch = torch.from_numpy(cos_full).to(data['test_torch_dtype'])
     sin_torch = torch.from_numpy(sin_full).to(data['test_torch_dtype'])
-    cos_batched = cos_torch.unsqueeze(0).expand(batch_size, -1, -1)
+    # Expand to (batch_size, seq_len, head_dim)
+    cos_batched = cos_torch.unsqueeze(0).expand(batch_size, -1, -1) 
     sin_batched = sin_torch.unsqueeze(0).expand(batch_size, -1, -1)
 
     # Step 3: Apply HF's rotary embeddings
@@ -194,9 +198,9 @@ def test_implementation_comparison():
     assert xk_rotated_llama3.shape == xk_rotated_hf_np.shape, \
         f"Output key shapes don't match between implementations"
 
-    assert np.allclose(xq_rotated_llama3, xq_rotated_hf_np, atol=5.0, rtol=1.0), \
+    assert np.allclose(xq_rotated_llama3, xq_rotated_hf_np, atol=1e-6, rtol=1.0), \
         "Query rotated values are not functionally equivalent between implementations"
-    assert np.allclose(xk_rotated_llama3, xk_rotated_hf_np, atol=5.0, rtol=1.0), \
+    assert np.allclose(xk_rotated_llama3, xk_rotated_hf_np, atol=1e-6, rtol=1.0), \
         "Key rotated values are not functionally equivalent between implementations"
 
 if __name__ == "__main__":
