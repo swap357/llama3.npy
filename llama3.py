@@ -15,10 +15,6 @@ logger = logging.getLogger(__name__)
 
 USE_FLOAT32 = True
 
-# Layer-specific caches for keys and values
-k_caches = None
-v_caches = None
-
 def softmax(x):
     """
     Computes softmax along the last dimension.
@@ -105,19 +101,7 @@ def rms_norm(x, weight, eps):
     """
     return x / np.sqrt(np.mean(x ** 2, axis=-1, keepdims=True) + eps) * weight
 
-def initialize_kv_caches(max_batch_size, max_seq_len, n_kv_heads, head_dim, n_layers):
-    """
-    Initializes key and value caches for all transformer layers.
-
-    Shape:
-        k_caches: list[n_layers] of arrays with shape (max_batch_size, max_seq_len, n_kv_heads, head_dim)
-        v_caches: list[n_layers] of arrays with shape (max_batch_size, max_seq_len, n_kv_heads, head_dim)
-    """
-    global k_caches, v_caches
-    k_caches = [np.zeros((max_batch_size, max_seq_len, n_kv_heads, head_dim), dtype=model_config.NP_DTYPE) for _ in range(n_layers)]
-    v_caches = [np.zeros((max_batch_size, max_seq_len, n_kv_heads, head_dim), dtype=model_config.NP_DTYPE) for _ in range(n_layers)]
-
-def attention(x, q_weight, k_weight, v_weight, o_weight, start_pos, mask, cos, sin,
+def attention(x, q_weight, k_weight, v_weight, o_weight, mask, cos, sin,
               n_heads, n_kv_heads, head_dim, scale, layer_idx):
     """
     Multi-head attention with grouped-query attention (GQA).
@@ -136,8 +120,6 @@ def attention(x, q_weight, k_weight, v_weight, o_weight, start_pos, mask, cos, s
         cos, sin: (seq_len, head_dim/2)
         output: (batch_size, seq_len, dim)
     """
-    global k_caches, v_caches
-
     b, t = x.shape[:2]
     xq, xk, xv = x @ q_weight.T, x @ k_weight.T, x @ v_weight.T
 
@@ -147,25 +129,19 @@ def attention(x, q_weight, k_weight, v_weight, o_weight, start_pos, mask, cos, s
 
     xq, xk = apply_rotary_emb(xq, xk, cos, sin)
 
-    # Use the appropriate layer's KV cache
-    k_caches[layer_idx][:, start_pos:start_pos + t] = xk
-    v_caches[layer_idx][:, start_pos:start_pos + t] = xv
-    k_seq = k_caches[layer_idx][:, :start_pos + t]
-    v_seq = v_caches[layer_idx][:, :start_pos + t]
-
     if n_heads > n_kv_heads:
         rep = n_heads // n_kv_heads
-        k_seq = np.repeat(k_seq, rep, axis=2)
-        v_seq = np.repeat(v_seq, rep, axis=2)
+        xk = np.repeat(xk, rep, axis=2)
+        xv = np.repeat(xv, rep, axis=2)
 
-    xq, k_seq, v_seq = xq.transpose(0, 2, 1, 3), k_seq.transpose(0, 2, 1, 3), v_seq.transpose(0, 2, 1, 3)
-    scores = np.einsum('bhqd,bhkd->bhqk', xq, k_seq) * scale
+    xq, xk, xv = xq.transpose(0, 2, 1, 3), xk.transpose(0, 2, 1, 3), xv.transpose(0, 2, 1, 3)
+    scores = np.einsum('bhqd,bhkd->bhqk', xq, xk) * scale
 
     if mask is not None:
         scores += mask[None, None, :, :]
 
     attn = softmax(scores)
-    out = np.einsum('bhqk,bhkd->bhqd', attn, v_seq)
+    out = np.einsum('bhqk,bhkd->bhqd', attn, xv)
     final_out = (out.transpose(0, 2, 1, 3).reshape(b, t, -1)) @ o_weight.T
 
     return final_out
@@ -192,7 +168,7 @@ def feed_forward(x, up_weight, gate_weight, down_weight):
     ffn_out = (swish * up_proj) @ down
     return ffn_out
 
-def transformer_block(x, layer_weights, pos, mask, cos, sin, n_heads, n_kv_heads, head_dim, norm_eps, layer_idx):
+def transformer_block(x, layer_weights, mask, cos, sin, n_heads, n_kv_heads, head_dim, norm_eps, layer_idx):
     """
     Single transformer layer with attention and feed-forward network.
 
@@ -224,7 +200,7 @@ def transformer_block(x, layer_weights, pos, mask, cos, sin, n_heads, n_kv_heads
     scale = 1.0 / math.sqrt(head_dim)
 
     attn_out = attention(norm_x, q_weight, k_weight, v_weight, o_weight,
-                         pos, mask, cos, sin, n_heads, n_kv_heads, head_dim, scale, layer_idx)
+                         mask, cos, sin, n_heads, n_kv_heads, head_dim, scale, layer_idx)
 
     h = x + attn_out
     norm_h = rms_norm(h, ln2_weight, norm_eps)
@@ -233,13 +209,12 @@ def transformer_block(x, layer_weights, pos, mask, cos, sin, n_heads, n_kv_heads
 
     return block_output
 
-def forward(input_ids, pos, weights, args, cos, sin):
+def forward(input_ids, weights, args, cos, sin):
     """
     Forward pass through the entire model.
 
     Shape:
         input_ids: (batch_size, seq_len)
-        pos: starting position for caching
         weights: dict containing all model parameters
         output: logits with shape (batch_size, 1, vocab_size)
     """
@@ -254,11 +229,11 @@ def forward(input_ids, pos, weights, args, cos, sin):
     if t > 1:
         mask = np.triu(np.full((t, t), float("-inf"), dtype=model_config.NP_DTYPE), 1)
 
-    cos_t, sin_t = cos[pos:pos + t], sin[pos:pos + t]
+    cos_t, sin_t = cos[:t], sin[:t]
 
     for i in range(args.n_layers):
         hidden = transformer_block(
-            hidden, weights, pos, mask, cos_t, sin_t,
+            hidden, weights, mask, cos_t, sin_t,
             args.n_heads, args.n_kv_heads or args.n_heads, args.dim // args.n_heads,
             args.norm_eps, i
         )
@@ -282,10 +257,7 @@ def generate(input_ids, max_new_tokens, weights, args, cos, sin):
     current_input_ids = input_ids.copy()
 
     for i in range(max_new_tokens):
-        pos = 0 if i == 0 else t + i - 1
-        inputs_this_step = current_input_ids if i == 0 else current_input_ids[:, [-1]]
-
-        logits = forward(inputs_this_step, pos, weights, args, cos, sin)
+        logits = forward(current_input_ids, weights, args, cos, sin)
 
         if args.do_sample:
             logits_last = logits[:, -1, :] / args.temperature
@@ -310,14 +282,7 @@ def initialize_model(path, args):
         cos, sin: arrays of shape (max_seq_len, head_dim/2) for rotary embeddings
     """
     weights = model_utils.load_parameters(path)
-
     cos, sin = compute_cos_sin_cache(args.dim // args.n_heads, args.max_seq_len)
-
-    # Initialize KV caches for each layer
-    head_dim = args.dim // args.n_heads
-    n_kv_heads = args.n_kv_heads or args.n_heads
-    initialize_kv_caches(args.max_batch_size, args.max_seq_len, n_kv_heads, head_dim, args.n_layers)
-
     return weights, cos, sin
 
 if __name__ == '__main__':
